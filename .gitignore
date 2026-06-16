@@ -1,0 +1,61 @@
+# ==========================================
+# 1. Executables and Compiled Binaries
+# ==========================================
+*.exe
+*.out
+*.app
+*.bin
+
+# Ignore specifically named build outputs from our modules
+*exploitation
+*solver
+*btp_test
+
+# ==========================================
+# 2. Object Files and Linker Outputs
+# ==========================================
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+
+# ==========================================
+# 3. Build Directories and Output Folders
+# ==========================================
+output/
+[Oo]utput/
+build/
+[Bb]uild/
+bin/
+
+# ==========================================
+# 4. VS Code and IDE Specific Files
+# ==========================================
+.vscode/
+.idea/
+*.suo
+*.user
+*.userossc
+*.sln
+*.vcxproj
+*.filters
+
+# ==========================================
+# 5. Future Python Implementation (Phase 2 & 3)
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+
+# ==========================================
+# 6. System and Miscellaneous Files
+# ==========================================
+.DS_Store
+Thumbs.db
+*.log
