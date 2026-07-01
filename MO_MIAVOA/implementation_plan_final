@@ -1,0 +1,446 @@
+# MO-MIAVOA Phase 1 — Architecture & Implementation Plan
+
+## 1. Project Structure
+
+```
+d:\Projects\MO_MIAVOA\
+├── config.py                  # All tunable parameters with defaults
+├── main.py                    # Entry point — run optimization + visualize
+│
+├── environment/
+│   ├── __init__.py
+│   ├── models.py              # Dataclasses: Building, WindZone, Environment, Path
+│   ├── generator.py           # Random environment generation (seeded)
+│   ├── collision.py           # Segment-polygon intersection, min clearance
+│   └── wind.py                # Wind zone exposure (per-segment clipping)
+│
+├── objectives/
+│   ├── __init__.py
+│   ├── time_obj.py            # Objective 1: Delivery Time
+│   ├── energy_obj.py          # Objective 2: Energy Expenditure
+│   ├── risk_obj.py            # Objective 3: Medical Payload Risk
+│   └── evaluator.py           # Combined evaluator — computes (T, E, R) tuple
+│
+├── optimizer/
+│   ├── __init__.py
+│   ├── archive.py             # Pareto archive: dominance, crowding distance, insert/prune
+│   ├── leader_selection.py    # Crowding-distance tournament → leader pool
+│   ├── miavoa_core.py         # MIAVOA position-update equations
+│   ├── crossover.py           # Splice crossover + repair
+│   ├── mutation.py            # Adaptive Lévy perturbation + bounded detour
+│   └── mo_miavoa.py           # Main loop orchestrator
+│
+├── selection/
+│   ├── __init__.py
+│   └── final_selection.py     # Weighted aggregation + knee point
+│
+├── visualization/
+│   ├── __init__.py
+│   └── plotting.py            # Environment plot, path overlay, Pareto front plot
+│
+└── tests/
+    ├── test_environment.py
+    ├── test_objectives.py
+    ├── test_archive.py
+    └── test_optimizer.py
+```
+
+---
+
+## 2. Dependency Diagram
+
+```mermaid
+graph TD
+    CONFIG["config.py"]
+
+    subgraph Environment
+        MODELS["models.py"]
+        GENERATOR["generator.py"]
+        COLLISION["collision.py"]
+        WIND["wind.py"]
+    end
+
+    subgraph Objectives
+        TIME_OBJ["time_obj.py"]
+        ENERGY_OBJ["energy_obj.py"]
+        RISK_OBJ["risk_obj.py"]
+        EVALUATOR["evaluator.py"]
+    end
+
+    subgraph Optimizer
+        ARCHIVE["archive.py"]
+        LEADER["leader_selection.py"]
+        CORE["miavoa_core.py"]
+        CROSSOVER["crossover.py"]
+        MUTATION["mutation.py"]
+        MO_MIAVOA["mo_miavoa.py"]
+    end
+
+    subgraph Selection
+        FINAL["final_selection.py"]
+    end
+
+    subgraph Visualization
+        PLOTTING["plotting.py"]
+    end
+
+    MAIN["main.py"]
+
+    CONFIG --> MODELS
+    CONFIG --> GENERATOR
+    CONFIG --> CORE
+    CONFIG --> CROSSOVER
+    CONFIG --> MUTATION
+
+    MODELS --> GENERATOR
+    MODELS --> COLLISION
+    MODELS --> WIND
+    MODELS --> TIME_OBJ
+    MODELS --> ENERGY_OBJ
+    MODELS --> RISK_OBJ
+
+    COLLISION --> RISK_OBJ
+    COLLISION --> CROSSOVER
+    COLLISION --> MUTATION
+    COLLISION --> CORE
+
+    WIND --> ENERGY_OBJ
+    WIND --> RISK_OBJ
+
+    TIME_OBJ --> EVALUATOR
+    ENERGY_OBJ --> EVALUATOR
+    RISK_OBJ --> EVALUATOR
+
+    EVALUATOR --> ARCHIVE
+    EVALUATOR --> MO_MIAVOA
+
+    ARCHIVE --> LEADER
+    ARCHIVE --> MO_MIAVOA
+    ARCHIVE --> FINAL
+
+    LEADER --> MO_MIAVOA
+    CORE --> MO_MIAVOA
+    CROSSOVER --> MO_MIAVOA
+    MUTATION --> MO_MIAVOA
+
+    GENERATOR --> MAIN
+    MO_MIAVOA --> MAIN
+    FINAL --> MAIN
+    PLOTTING --> MAIN
+    MODELS --> PLOTTING
+end
+```
+
+### Dependency Flow (simplified)
+
+```
+config.py
+    ↓
+environment/ (models → generator, collision, wind)
+    ↓
+objectives/ (time, energy, risk → evaluator)
+    ↓
+optimizer/ (archive, leader_selection, miavoa_core, crossover, mutation → mo_miavoa)
+    ↓
+selection/ (final_selection)
+    ↓
+visualization/ (plotting)
+    ↓
+main.py
+```
+
+---
+
+## 3. Config Defaults (`config.py`)
+
+```python
+# === Population & Iterations ===
+POPULATION_SIZE = 30
+MAX_ITERATIONS = 500
+NUM_WAYPOINTS = 8
+
+# === World ===
+WORLD_WIDTH = 1000.0          # meters
+WORLD_HEIGHT = 1000.0
+
+# === MIAVOA Parameters ===
+P1 = 0.6                     # Exploration strategy threshold
+P2 = 0.4                     # Exploitation sub-phase threshold
+P3 = 0.6                     # Late exploitation threshold
+ALPHA_CONTROL = 0.8           # Adaptive control parameter (α)
+BETA_LEVY = 1.5               # Lévy flight β
+OMEGA = 2.5                   # Hunger factor parameter
+
+# === Archive ===
+ARCHIVE_CAPACITY = 75
+LEADER_POOL_SIZE = 4
+
+# === Objective Coefficients ===
+DRONE_CRUISE_SPEED = 15.0     # m/s
+K1_ENERGY_DISTANCE = 1.0
+K2_ENERGY_WIND = 0.5
+WIND_INTENSITY = {"green": 1.0, "yellow": 3.0, "red": 6.0}
+W_CLEARANCE = 0.4
+W_TURNING = 0.3
+W_WIND_RISK = 0.3
+CLEARANCE_DECAY_ALPHA = 0.1   # in f(c) = exp(-α·c)
+SAFETY_BUFFER = 15.0          # meters
+
+# === GA Component ===
+CROSSOVER_INTERVAL = 12
+MUTATION_RATE = 0.1
+LEVY_SCALE = 1.0              # Adaptive Lévy scale factor
+REPAIR_MAX_RETRIES = 3
+REPAIR_CLEARANCE = 5.0        # meters
+
+# === Environment Generation ===
+NUM_BUILDINGS = 15
+BUILDING_WIDTH_RANGE = (30, 100)
+BUILDING_HEIGHT_RANGE = (30, 150)
+NUM_WIND_ZONES = 4
+WIND_ZONE_SIZE_RANGE = (100, 300)
+SOURCE_DEST_MIN_SEPARATION = 500.0
+
+# === Final Selection ===
+DEFAULT_WEIGHTS = {"time": 0.4, "energy": 0.3, "risk": 0.3}
+```
+
+---
+
+## 4. MO-MIAVOA Equations (Final — As Implemented)
+
+Only the equations we are actually implementing. No historical/original versions.
+
+### 4.1 Leader Selection
+
+Leaders are drawn from the Pareto archive via crowding-distance tournament:
+1. Pick 2 archive members at random
+2. Keep the one with greater crowding distance
+3. Repeat until pool has `LEADER_POOL_SIZE` members (default 4)
+4. When a position-update equation needs R(i), draw from this pool via roulette wheel:
+
+```
+p_i = CD_i / Σ CD_j    (probability proportional to crowding distance)
+```
+
+### 4.2 Hunger Factor
+
+```
+t = h × (sin(ω)×|cos(ω)| − cos(ω)×|sin(ω)|)
+    where ω = (π/2) × (iter / max_iter)
+          h = random in [-2, 2]
+
+F = (2×rand + 1) × z × (−exp(((iter/max_iter) × (e−1))² − 1)) + t
+    where z = random in [-1, 1]
+```
+Non-linear decay balances exploration (early) → exploitation (late).
+
+### 4.3 Exploration Phase (|F| ≥ 1)
+
+**Strategy 1** (if P1 ≥ randP1):
+```
+D(i) = |X × R(i) − P(i)|       where X = 2×rand
+P(i+1) = R(i) − D(i) × F
+```
+
+**Strategy 2** (otherwise):
+```
+P(i+1) = R(i) − F + rand × ((ub − lb) × rand + lb)
+```
+
+### 4.4 Exploitation Phase (|F| < 1)
+
+#### When 0.5 ≤ |F| < 1:
+
+**Food protection** (if P2 ≥ randP2):
+```
+d(t) = R(i) − P(i)
+P(i+1) = D(i) × (F + rand) − d(t)
+```
+
+**Spiral flight + Elite Candidate Pool** (otherwise):
+```
+S1 = R(i) × (rand/(2π)) × cos(P(i))
+S2 = R(i) × (rand/(2π)) × sin(P(i))
+
+R1 = R(i) + S1,  R2 = R(i) − S1
+R3 = R(i) + S2,  R4 = R(i) − S2
+
+P(i+1) = best of {R1, R2, R3, R4}  (by Pareto rank, then crowding distance)
+```
+
+#### When |F| < 0.5:
+
+**Accumulation + Adaptive Control** (if P3 ≥ randP3):
+```
+A1 = Leader1 × (Leader1×P(i)) / (Leader1 − P(i)²) × F
+A2 = Leader2 × (Leader2×P(i)) / (Leader2 − P(i)²) × F
+
+α1 = α + (1−α) × (iter / max_iter)
+α2 = (1−α) − (1−α) × (iter / max_iter)
+
+P(i+1) = α1×A1 + α2×A2
+```
+
+**Lévy flight** (otherwise):
+```
+P(i+1) = R(i) − |d(t)| × F × Levy(dim)
+
+Levy(dim):
+  u ~ N(0,1),  v ~ N(0,1)
+  σ = (Γ(1+β)×sin(πβ/2) / (Γ((1+β)/2)×β×2^((β-1)/2)))^(1/β)
+  LF = 0.01 × u×σ / |v|^(1/β)
+```
+
+### 4.5 Initialization (GQRBL)
+
+```
+# Gaussian chaos map:
+γ_{n+1} = 0 if γ_n = 0, else (1/γ_n) mod 1
+
+# Generate quasi-reflected position:
+x_gqr = rand((lb+ub)/2,  lb + ub − γ × x)
+
+# Keep whichever of x or x_gqr is non-dominated (or has better crowding distance)
+```
+
+### 4.6 Boundary Handling
+
+After every position update:
+```python
+X = np.clip(X, 0, [WORLD_WIDTH, WORLD_HEIGHT, ...])  # repeating for each waypoint pair
+```
+
+---
+
+## 5. Mutation — Adaptive Lévy (replaces Gaussian jitter)
+
+Since Lévy flight is already part of MIAVOA's exploitation phase, we use **Adaptive Lévy perturbation** as the single mutation operator. No separate Gaussian jitter — that would be redundant.
+
+### Two mutation operators:
+
+**Operator 1 — Adaptive Lévy Perturbation:**
+Select one or more waypoints at random. Perturb each by a Lévy-distributed step:
+```
+step = scale × Levy(2)     (2D Lévy step)
+scale = base_scale × (1 − iter/max_iter)   # shrinks over time for convergence
+
+P_mutated = P_original + step
+```
+The adaptive scale starts large (exploration) and shrinks (exploitation), matching the algorithm's overall phase balance.
+
+**Operator 2 — Bounded Detour:**
+Bow out a short consecutive run of waypoints along a random perpendicular offset, then smooth back. This explores alternative corridors without Lévy's heavy tail.
+
+### Post-mutation:
+- Clamp to world boundary
+- Check feasibility of affected segments only
+- If infeasible → move waypoint to nearest feasible location (see Section 6)
+- If still infeasible after repair → discard mutation, keep original
+
+---
+
+## 6. Repair Strategy — Simplified
+
+Instead of tangent snap + iterative push-out, we use a single **nearest-feasible-location** repair:
+
+```python
+def repair_to_feasible(waypoint, prev_wp, next_wp, buildings, max_retries=REPAIR_MAX_RETRIES):
+    """Move waypoint to nearest position where both adjacent edges clear all buildings."""
+    
+    for attempt in range(max_retries):
+        if segment_is_feasible(prev_wp, waypoint, buildings) and \
+           segment_is_feasible(waypoint, next_wp, buildings):
+            return waypoint  # already feasible
+        
+        # Find the blocking building
+        blocker = find_blocking_building(prev_wp, waypoint, next_wp, buildings)
+        
+        # Move waypoint to the nearest corner of the blocker + clearance offset
+        corners = get_corners_with_clearance(blocker, REPAIR_CLEARANCE)
+        
+        # Pick the corner that minimizes total detour distance
+        best_corner = min(corners, key=lambda c: 
+            dist(prev_wp, c) + dist(c, next_wp))
+        
+        # Only accept if this corner has line-of-sight to both neighbors
+        if segment_is_feasible(prev_wp, best_corner, buildings) and \
+           segment_is_feasible(best_corner, next_wp, buildings):
+            return best_corner
+        
+        waypoint = best_corner  # try again from new position
+    
+    return None  # repair failed — discard this offspring
+```
+
+This is simpler, deterministic, and covers the same intent: route around the blocking obstacle via its nearest visible corner.
+
+---
+
+## 7. Key Module APIs
+
+### `environment/collision.py`
+```python
+def segment_intersects_rect(p1, p2, rect) -> bool
+def point_in_rect(point, rect) -> bool
+def minimum_clearance(p1, p2, rect) -> float
+def path_is_feasible(path, buildings) -> bool
+def segment_is_feasible(p1, p2, buildings) -> bool
+def find_blocking_building(p1, waypoint, p2, buildings) -> Building | None
+def get_corners_with_clearance(building, clearance) -> list[tuple]
+```
+
+### `environment/wind.py`
+```python
+def clip_segment_to_rect(p1, p2, rect) -> float  # length inside rect
+def wind_exposure(path, wind_zones) -> dict[str, float]  # distance per intensity
+```
+
+### `optimizer/archive.py`
+```python
+def dominates(obj_a, obj_b) -> bool
+def compute_crowding_distances(archive) -> list[float]
+def try_insert(candidate, archive, max_size) -> bool
+def prune_archive(archive, max_size)
+```
+
+### `optimizer/crossover.py`
+```python
+def splice_crossover(parent1, parent2, env) -> Path | None
+def repair_to_feasible(waypoint, prev_wp, next_wp, buildings) -> tuple | None
+```
+
+### `optimizer/mutation.py`
+```python
+def adaptive_levy_mutation(path, iter, max_iter, env) -> Path | None
+def bounded_detour_mutation(path, env) -> Path | None
+```
+
+---
+
+## 8. Implementation Phases
+
+| Phase | Modules | Depends On |
+|---|---|---|
+| **A: Environment** | `config.py`, `models.py`, `generator.py`, `collision.py`, `wind.py` | Nothing |
+| **B: Objectives** | `time_obj.py`, `energy_obj.py`, `risk_obj.py`, `evaluator.py` | Phase A |
+| **C: Optimizer Core** | `archive.py`, `leader_selection.py`, `miavoa_core.py` | Phase B |
+| **D: GA Component** | `crossover.py`, `mutation.py`, `mo_miavoa.py` | Phase C |
+| **E: Output** | `final_selection.py`, `plotting.py`, `main.py` | Phase D |
+| **F: Testing** | `tests/` | All |
+
+---
+
+## 9. Verification Plan
+
+### Automated Tests
+- **Geometry**: known segment-rect intersections, clearance distances
+- **Objectives**: hand-computed T, E, R for a simple 2-waypoint path
+- **Archive**: verify dominance, crowding distance, insert/prune behavior
+- **Full run**: seed=42, verify archive grows and objectives improve over iterations
+
+### Visual Verification
+- Plot environment with buildings + wind zones
+- Overlay Pareto-front paths (color-coded)
+- Plot 3D Pareto front (T vs E vs R)
+- Convergence curve (hypervolume over iterations)
